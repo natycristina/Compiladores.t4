@@ -65,7 +65,7 @@ ls -la
 
 ## 🔧 Como Compilar
 
-**✅ Não é necessário compilar!** Todos os arquivos Python já estão prontos no repositório.
+**✅** Todos os arquivos Python já estão prontos no repositório.
 
 ### Passo 1: Instalar Dependências
 ```bash
