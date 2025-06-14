@@ -9,20 +9,6 @@ else:
 
 
 def serializedATN():
-    """
-    Retorna a 'Abstract Target Notation' (ATN) serializada do lexer.
-    A ATN é uma representação de máquina de estados finitos que o ANTLR
-    usa internamente para reconhecer tokens.
-
-    **O que é a ATN?**
-    É a estrutura de dados que define o comportamento do analisador léxico.
-    Ela é gerada a partir das regras léxicas na gramática `LA.g4`.
-    Esta representação serializada é otimizada para ser carregada rapidamente
-    pelo tempo de execução do ANTLR.
-
-    **Retorno:**
-        list: Uma lista de inteiros que representa a ATN de forma compacta e serializada.
-    """
     return [
         4,0,70,823,6,-1,2,0,7,0,2,1,7,1,2,2,7,2,2,3,7,3,2,4,7,4,2,5,7,5,
         2,6,7,6,2,7,7,7,2,8,7,8,2,9,7,9,2,10,7,10,2,11,7,11,2,12,7,12,2,
@@ -327,29 +313,8 @@ def serializedATN():
         0
     ]
 
-# ---
-## Classe `LALexer`: O Analisador Léxico da Linguagem de Algoritmos (LA)
-# ---
 class LALexer(Lexer):
 
-    """
-    `LALexer` é a classe do analisador léxico gerada automaticamente pelo ANTLR
-    a partir da gramática `LA.g4`. Sua função é transformar o fluxo de caracteres
-    da entrada (código-fonte) em um fluxo de tokens, que são as unidades léxicas
-    básicas da linguagem.
-
-    **Principais Responsabilidades:**
-    -   Definir e carregar a ATN (Abstract Target Notation) para o reconhecimento de tokens.
-    -   Mapear as regras léxicas da gramática para constantes inteiras (IDs de tokens).
-    -   Fornecer nomes literais e simbólicos para cada token, facilitando a depuração e o entendimento.
-    -   Inicializar o simulador da ATN para o processo de tokenização.
-
-    **Este arquivo não deve ser modificado manualmente**, pois qualquer alteração
-    será sobrescrita na próxima geração do lexer pelo ANTLR.
-    """
-
-    # Atributo que armazena a ATN desserializada (estrutura de máquina de estados).
-    # É essencial para o funcionamento do lexer, pois define como os caracteres são agrupados em tokens.
     atn = ATNDeserializer().deserialize(serializedATN())
 
     decisionsToDFA = [ DFA(ds, i) for i, ds in enumerate(atn.decisionToState) ]

@@ -1,32 +1,18 @@
-{ dada uma relação de preços e quantidade relativas a mídias de DVD virgens, calcular o valor total em estoque (em reais) e o preço médio da unidade de DVD; o fim dos dados é indicado por preço e quantidade iguais a zero }
+{ dada uma variável, modificar seu conteúdo usando apenas seu endereço }
 
 algoritmo
-	declare
-		numeroItens, quantidade: inteiro
-	declare
-		preco, valorTotal, somaUnitarios: real
+	declare valor: inteiro { um inteiro comum }
+	declare ponteiro: ^inteiro { um ponteiro para inteiro }
 
-	{ valores iniciais dos contadores }
-	numeroItens <- 0
-	valorTotal <- 0 + "NADA"
-	somaUnitarios <- 0
+	{ atribuição de um dado inicial }
+	valor <- 100
 
-	{ leitura dos dados }
-	leia(preco, quantidade)
-	enquanto preco_final <> 0 e quantidade <> 0 faca
-		{ conta e acumula }
-		numeroItens <- numeroItens + 1
-		valorTotal <- valorTotal + preco * quantidade
-		somaUnitarios <- somaUnitarios + preco
-		{ obtém o próximo item }
-		leia(preco, quantidade)
-	fim_enquanto
+	{ determinação do endereço da variável }
+	ponteiro <- &valor
 
-	{ resultados }
-	escreva("Valor total: R$", valorTotal)
-	se numeroItens = 0 entao
-		escreva("Nao eh possivel calcular o preco medio unitario")
-	senao
-		escreva("Valor unitario medio: R$", 1.0 * somaUnitarios/numeroItens)
-	fim_se
+	{ uso do ponteiro para mexer na memória }
+	^ponteiro <- "200"
+
+	{ verificação do valor armazenado em valor }
+	escreva(valor) { 200!!! }
 fim_algoritmo

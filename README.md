@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🔍 Analisador Semântico - Linguagem Algorítmica (LA)
 
 Este projeto implementa um **analisador semântico** para a linguagem algorítmica LA (Linguagem Algorítmica). O analisador realiza verificações semânticas como verificação de declaração de variáveis, verificação de tipos em atribuições, detecção de identificadores duplicados, validação de tipos em expressões e análise de compatibilidade de tipos.
@@ -124,3 +125,6 @@ Compiladores.T3/
 ├── README.md                # Este arquivo
 └── outros arquivos...
 ```
+=======
+# Compiladores.t4
+>>>>>>> 22926834f2af7d3c4f5a5c86f7c45dac16e59888
