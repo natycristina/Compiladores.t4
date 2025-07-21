@@ -1,920 +1,874 @@
 import sys
 from antlr4 import *
-from antlr4.error.ErrorListener import ErrorListener
-# Correção: Importar ParserRuleContext diretamente de antlr4, não de antlr4.tree.Tree
-from antlr4.tree.Tree import TerminalNode, ParseTreeWalker
-from antlr4 import ParserRuleContext # Importação corrigida para ParserRuleContext
-
-# Importa as classes geradas pelo ANTLR.
-# Certifique-se de que 'LAParser.py', 'LALexer.py', 'LAListener.py'
-# estejam no mesmo diretório ou acessíveis no PYTHONPATH.
 from LAParser import LAParser
 from LALexer import LALexer
 from LAListener import LAListener
 
-# Tipos primitivos da linguagem LA que são sempre válidos.
-# 'endereco' é adicionado como um tipo implícito para operações com ponteiros.
-TIPOS_PRIMITIVOS = {'literal', 'inteiro', 'real', 'logico', 'endereco'}
+# Lista de tipos válidos (de acordo com a gramática)
+TIPOS_VALIDOS = {'literal', 'inteiro', 'real', 'logico'}
 
-# Classe para representar uma entrada na tabela de símbolos.
-# Armazena o nome, categoria (variável, função, tipo, etc.), informações de tipo e linha de declaração.
-class SymbolEntry:
-    def __init__(self, name, category, type_info, line):
-        self.name = name
-        self.category = category # Ex: 'variavel', 'constante', 'procedimento', 'funcao', 'tipo', 'parametro'
-        self.type_info = type_info # Pode ser uma string ('inteiro'), ou um dicionário para registros/funções
-        self.line = line # Linha onde o símbolo foi declarado
-
-# Classe para gerenciar a tabela de símbolos e os escopos.
-# Usa uma pilha de dicionários para representar os escopos aninhados.
-class SymbolTable:
-    def __init__(self):
-        # A pilha de escopos, começando com o escopo global.
-        self.scopes = [{}]
-
-    # Adiciona um novo escopo (um novo dicionário) à pilha.
-    def push_scope(self):
-        self.scopes.append({})
-
-    # Remove o escopo mais recente da pilha. Não remove o escopo global.
-    def pop_scope(self):
-        if len(self.scopes) > 1:
-            self.scopes.pop()
-
-    # Declara um símbolo no escopo atual.
-    # Retorna True se a declaração for bem-sucedida (símbolo não existia no escopo atual), False caso contrário.
-    def declare_symbol(self, name, category, type_info, line):
-        current_scope = self.scopes[-1]
-        if name in current_scope:
-            return False # Símbolo já declarado no escopo atual
-        current_scope[name] = SymbolEntry(name, category, type_info, line)
-        return True
-
-    # Busca um símbolo, começando pelo escopo atual e subindo até o escopo global.
-    # Retorna o objeto SymbolEntry se encontrado, None caso contrário.
-    def lookup_symbol(self, name):
-        for scope in reversed(self.scopes):
-            if name in scope:
-                return scope[name]
-        return None
-
-    # Retorna o dicionário de símbolos do escopo atual.
-    def get_current_scope_symbols(self):
-        return self.scopes[-1]
-
-# Um Listener de Erros personalizado para capturar erros de sintaxe.
-# No entanto, o foco principal deste trabalho são os erros semânticos.
-class CustomErrorListener(ErrorListener):
-    def __init__(self):
-        super().__init__()
-        self.errors = []
-
-    def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):
-        # Para este trabalho, vamos focar nos erros semânticos.
-        # Erros de sintaxe podem ser ignorados ou registrados de forma diferente.
-        pass
-
-# A classe principal do analisador semântico, que estende LAListener.
-# Ela percorre a árvore de parse e realiza verificações semânticas.
 class AnalisadorSemantico(LAListener):
     def __init__(self, token_stream):
-        self.symbol_table = SymbolTable()
-        self.erros = [] # Lista para armazenar todos os erros semânticos encontrados
-        self.tokens = token_stream # Stream de tokens para obter informações de linha
+        self.simbolos = {}   # dicionário nome -> tipo
+        self.erros = []
+        self.tokens = token_stream
+        self.tipos_definidos = {}  # Para armazenar tipos personalizados como registros
+        self.campos_registro = {}  # Para armazenar campos de registros
+        self.funcoes = {}  # Para armazenar informações sobre funções: nome -> {'tipo_retorno': str, 'parametros': [(nome, tipo)]}
+        self.procedimentos = {}  # Para armazenar informações sobre procedimentos
+        self.escopo_atual = 'global'  # Para controlar escopo (global, funcao, procedimento)
+        self.simbolos_locais = {}  # Para armazenar símbolos do escopo local atual
+        self.constantes = {}  # Para armazenar constantes declaradas
 
-        # Variáveis de estado para rastrear o contexto do analisador
-        self.current_function_return_type = None # Armazena o tipo de retorno da função atual para verificação do 'retorne'
-        self.in_function_or_procedure = 0 # Contador para saber se estamos dentro de um proc/função (para 'retorne')
-
-    # Retorna o número da linha de um token.
+    # Pega o número da linha do token (para mensagens)
     def linha_token(self, token):
-        if token:
-            return token.line
-        return -1
+        return token.line
 
-    # Verifica a compatibilidade entre dois tipos para uma atribuição (LHS <- RHS).
-    # tipo_var: o tipo da variável no lado esquerdo da atribuição.
-    # tipo_exp: o tipo da expressão no lado direito da atribuição.
-    def eh_compativel_atribuicao(self, tipo_var, tipo_exp):
-        if tipo_var is None or tipo_exp is None:
-            return False
-
-        # Compatibilidade exata (ex: 'inteiro' == 'inteiro')
-        if tipo_var == tipo_exp:
-            return True
-        
-        # Promoção numérica: inteiro pode ser atribuído a real
-        if tipo_var == 'real' and tipo_exp == 'inteiro':
-            return True
-        
-        # Atribuição de ponteiro: ponteiro <- endereço
-        # 'tipo_var' será uma string como '^inteiro', e 'tipo_exp' será 'endereco'.
-        if isinstance(tipo_var, str) and tipo_var.startswith('^') and tipo_exp == 'endereco':
-            # Uma verificação mais rigorosa exigiria que o tipo base do ponteiro
-            # corresponda ao tipo da variável cujo endereço está sendo tomado, mas simplificamos aqui.
-            return True 
-
-        # Atribuição de registro: registro <- registro (com mesmo nome de tipo)
-        # tipo_var e tipo_exp são os nomes dos tipos de registro.
-        # Isto se aplica a registros nomeados (ex: 'PontoXYZ').
-        if isinstance(tipo_var, str) and isinstance(tipo_exp, str):
-            sym_var_type_def = self.symbol_table.lookup_symbol(tipo_var)
-            sym_exp_type_def = self.symbol_table.lookup_symbol(tipo_exp)
-
-            if sym_var_type_def and sym_exp_type_def:
-                if (sym_var_type_def.category == 'tipo' and
-                    isinstance(sym_var_type_def.type_info, dict) and
-                    sym_var_type_def.type_info.get('category') == 'registro') and \
-                   (sym_exp_type_def.category == 'tipo' and
-                    isinstance(sym_exp_type_def.type_info, dict) and
-                    sym_exp_type_def.type_info.get('category') == 'registro'):
-                    # Nomes dos tipos de registro devem ser os mesmos para compatibilidade por nome
-                    return tipo_var == tipo_exp
-        
-        # Compatibilidade para registros inline (anônimos) - por estrutura, se permitido pela linguagem.
-        # Se tipo_var e tipo_exp são dicionários que representam registros inline.
-        if isinstance(tipo_var, dict) and tipo_var.get('category') == 'registro_inline' and \
-           isinstance(tipo_exp, dict) and tipo_exp.get('category') == 'registro_inline':
-            # Para simplificar, vamos exigir compatibilidade exata da estrutura.
-            # Em um compilador real, isso envolveria comparar todos os campos e seus tipos recursivamente.
-            # Aqui, para o T4, assumiremos que registros inline *não* são compatíveis entre si
-            # a menos que sejam a mesma referência de objeto (o que não acontece com cópias de dicionário).
-            # Se a intenção for compatibilidade estrutural para inline, esta lógica precisaria ser expandida.
-            # A menos que explicitamente exigido, assume-se que inline records não são intercambiáveis por atribuição.
-            return False # Registros inline não são compatíveis entre si por atribuição direta, apenas campos.
-
-        return False
-
-    # Helper para resolver o tipo de um L-value (lado esquerdo de atribuição/leitura).
-    # Lida com IDENT (TerminalNode), Acesso_campoContext, e desreferenciação de ponteiro (^IDENT).
-    def resolve_lvalue_type(self, lvalue_ctx):
-        # Caso 1: Identificador simples (TerminalNode IDENT)
-        if isinstance(lvalue_ctx, TerminalNode) and lvalue_ctx.getSymbol().type == LAParser.IDENT:
-            name = lvalue_ctx.getText()
-            sym_entry = self.symbol_table.lookup_symbol(name)
-            if sym_entry is None:
-                self.erros.append(f"Linha {self.linha_token(lvalue_ctx.getSymbol())}: identificador {name} nao declarado")
-                return None
-            return sym_entry.type_info # Pode ser string (primitivo, nome de tipo) ou dict (registro inline)
-
-        # Caso 2: Acesso a campo (Acesso_campoContext)
-        elif isinstance(lvalue_ctx, LAParser.Acesso_campoContext):
-            base_name = lvalue_ctx.IDENT(0).getText()
-            sym_entry = self.symbol_table.lookup_symbol(base_name)
-            if sym_entry is None:
-                self.erros.append(f"Linha {self.linha_token(lvalue_ctx.IDENT(0).getSymbol())}: identificador {base_name} nao declarado")
-                return None
-            
-            # current_type_def_or_name pode ser uma string (nome de tipo) ou um dicionário (registro inline)
-            current_type_def_or_name = sym_entry.type_info 
-            
-            # Obter a definição do registro (campos)
-            current_record_fields = {}
-            if isinstance(current_type_def_or_name, str): # É um nome de tipo (pode ser um registro nomeado ou ponteiro para ele)
-                if current_type_def_or_name.startswith('^'):
-                    base_type_name_for_record = current_type_def_or_name[1:] # Desreferencia o ponteiro
-                else:
-                    base_type_name_for_record = current_type_def_or_name
-
-                record_type_entry = self.symbol_table.lookup_symbol(base_type_name_for_record)
-                
-                if (record_type_entry is None or
-                    record_type_entry.category != 'tipo' or
-                    not isinstance(record_type_entry.type_info, dict) or
-                    record_type_entry.type_info.get('category') != 'registro'):
-                    self.erros.append(f"Linha {self.linha_token(lvalue_ctx.IDENT(0).getSymbol())}: acesso de campo invalido em '{lvalue_ctx.getText()}' - '{current_type_def_or_name}' nao eh um registro ou ponteiro para registro")
-                    return None
-                current_record_fields = record_type_entry.type_info.get('campos', {})
-            elif isinstance(current_type_def_or_name, dict) and current_type_def_or_name.get('category') == 'registro_inline':
-                # É um registro inline diretamente. Use seus campos.
-                current_record_fields = current_type_def_or_name.get('campos', {})
-            else:
-                self.erros.append(f"Linha {self.linha_token(lvalue_ctx.IDENT(0).getSymbol())}: identificador {base_name} nao eh um registro ou ponteiro para registro para acesso de campo")
-                return None
-
-            resolved_field_type = None
-            # Itera sobre os campos aninhados (IDENT(1), IDENT(2), etc.)
-            for i in range(1, len(lvalue_ctx.IDENT())):
-                field_ident_token = lvalue_ctx.IDENT(i).getSymbol()
-                field_name = field_ident_token.text
-                
-                if field_name not in current_record_fields:
-                    self.erros.append(f"Linha {self.linha_token(field_ident_token)}: campo '{field_name}' nao existe no registro")
-                    return None
-                
-                resolved_field_type = current_record_fields[field_name]['type']
-                
-                # Se o campo acessado é ele próprio um registro (nomeado ou inline),
-                # atualizamos `current_record_fields` para a próxima iteração de campo.
-                if isinstance(resolved_field_type, str): # Nome de um tipo, pode ser um registro nomeado
-                    next_record_entry = self.symbol_table.lookup_symbol(resolved_field_type)
-                    if (next_record_entry and next_record_entry.category == 'tipo' and
-                        isinstance(next_record_entry.type_info, dict) and
-                        next_record_entry.type_info.get('category') == 'registro'):
-                        current_record_fields = next_record_entry.type_info.get('campos', {})
-                    else: # Não é um registro nomeado, então a cadeia de acesso termina aqui.
-                        break
-                elif isinstance(resolved_field_type, dict) and resolved_field_type.get('category') == 'registro_inline':
-                    # É um registro inline aninhado.
-                    current_record_fields = resolved_field_type.get('campos', {})
-                else: # Não é um registro (nem nomeado, nem inline), então a cadeia de acesso termina.
-                    break
-            
-            return resolved_field_type # Retorna o tipo do último campo acessado.
-            
-        return None # Contexto de L-value não reconhecido.
-
-    # Determina o tipo de uma expressão.
-    # Percorre recursivamente a árvore da expressão, aplicando regras de tipo.
     def tipo_expressao(self, ctx):
-        from LAParser import LAParser # Importa LAParser localmente para verificações de tipo de contexto
+        # Importa as classes do parser para usar isinstance
+        from LAParser import LAParser
 
-        # Expressão lógica (ou, e)
-        if isinstance(ctx, LAParser.Expressao_logicaContext):
+        # 1) Caso raiz: expressao : expressao_logica
+        if isinstance(ctx, LAParser.ExpressaoContext):
+            return self.tipo_expressao(ctx.expressao_logica())
+
+        # 2) expressao_logica : expressao_relacional ('e' expressao_relacional | 'ou' expressao_relacional)*
+        elif isinstance(ctx, LAParser.Expressao_logicaContext):
+            # Avalia o tipo de todas as expressao_relacional dentro da expressão lógica
             tipos = [self.tipo_expressao(child) for child in ctx.expressao_relacional()]
-            tipos = [t for t in tipos if t is not None] # Filtra tipos None (indicam erro anterior)
-
-            if not tipos: return None
-
+            
+            # Se só um elemento (sem operadores lógicos)
             if len(tipos) == 1:
                 return tipos[0]
             
-            # Todos os operandos devem ser lógicos para operadores 'e'/'ou'.
-            for t in tipos:
-                if t != 'logico':
-                     self.erros.append(f"Linha {ctx.start.line}: operacao logica nao compativel com tipo '{t}'")
-                     return None # Incompatível
-            return 'logico'
+            # Senão, todos precisam ser 'logico' para o 'e' / 'ou' fazer sentido
+            if all(t == 'logico' for t in tipos):
+                return 'logico'
+            else:
+                return None
 
-        # Expressão relacional (>, <, =, >=, <=, <>)
+        # 3) expressao_relacional : expressao_aritmetica ((OP_RELACIONAL | IGUAL) expressao_aritmetica)?
         elif isinstance(ctx, LAParser.Expressao_relacionalContext):
             if ctx.getChildCount() == 1:
+                # Só expressao_aritmetica, sem operador relacional
                 return self.tipo_expressao(ctx.expressao_aritmetica(0))
             else:
                 tipo_esq = self.tipo_expressao(ctx.expressao_aritmetica(0))
                 tipo_dir = self.tipo_expressao(ctx.expressao_aritmetica(1))
-                
-                if tipo_esq is None or tipo_dir is None: return None
-
-                # Operadores relacionais retornam 'logico' se os tipos são compatíveis.
-                # Números (inteiro, real) são compatíveis entre si.
-                # Outros tipos são compatíveis se forem exatamente o mesmo tipo (e.g., literal == literal).
-                if (tipo_esq in ('inteiro','real') and tipo_dir in ('inteiro','real')) or \
-                   (tipo_esq == tipo_dir):
+                # Operadores relacionais retornam 'logico' se os tipos são compatíveis (ex: inteiros, reais)
+                if tipo_esq in ('inteiro','real') and tipo_dir in ('inteiro','real'):
                     return 'logico'
-                else:
-                    self.erros.append(f"Linha {ctx.start.line}: incompatibilidade de tipo em expressao relacional. Comparando '{tipo_esq}' com '{tipo_dir}'")
-                    return None
+                if tipo_esq == tipo_dir:
+                    return 'logico'
+                return None
 
-        # Expressão aritmética (+, -)
+        # 4) expressao_aritmetica : termo (( '+' | '-' ) termo)*
         elif isinstance(ctx, LAParser.Expressao_aritmeticaContext):
             tipos = [self.tipo_expressao(term) for term in ctx.termo()]
-            tipos = [t for t in tipos if t is not None]
-
-            if not tipos: return None
-
             tipo_acumulado = tipos[0]
-            for i, t in enumerate(tipos[1:]):
-                op_token = ctx.getChild(2 * i + 1) # Operador (+ ou -)
-                op_text = op_token.getText()
-                
+            for t in tipos[1:]:
                 if tipo_acumulado in ('inteiro','real') and t in ('inteiro','real'):
-                    # Promoção para real se um dos tipos for real.
+                    # promoção numérica
                     tipo_acumulado = 'real' if 'real' in (tipo_acumulado, t) else 'inteiro'
-                elif tipo_acumulado == 'literal' and t == 'literal' and op_text == '+':
-                    # Concatenação de literais apenas com '+'.
+                elif tipo_acumulado == 'literal' and t == 'literal':
+                    # concatenação literal
                     tipo_acumulado = 'literal'
                 else:
-                    self.erros.append(f"Linha {ctx.start.line}: operacao aritmetica nao compativel entre '{tipo_acumulado}' e '{t}'")
-                    return None # Tipos incompatíveis para a operação
+                    return None
             return tipo_acumulado
 
-        # Termo (*, /, %)
+        # 5) termo : fator (( '*' | '/' | '%' ) fator)*
         elif isinstance(ctx, LAParser.TermoContext):
             tipos = [self.tipo_expressao(fat) for fat in ctx.fator()]
-            tipos = [t for t in tipos if t is not None]
-
-            if not tipos: return None
-
             tipo_acumulado = tipos[0]
             for t in tipos[1:]:
                 if tipo_acumulado in ('inteiro','real') and t in ('inteiro','real'):
                     tipo_acumulado = 'real' if 'real' in (tipo_acumulado, t) else 'inteiro'
                 else:
-                    self.erros.append(f"Linha {ctx.start.line}: operacao aritmetica nao compativel entre '{tipo_acumulado}' e '{t}'")
                     return None
             return tipo_acumulado
 
-        # Fator (identificadores, literais, parênteses, unários, chamadas de função, endereços)
+        # 6) fator : vários casos terminais e recursivos
         elif isinstance(ctx, LAParser.FatorContext):
-            # Prioridade para operadores unários e desreferenciação, acessos compostos, etc.
-            
-            # Unary minus and 'nao'
-            if ctx.getChildCount() == 2:
-                first_child = ctx.getChild(0)
-                if isinstance(first_child, TerminalNode):
-                    first_child_text = first_child.getText().lower()
-                    if first_child_text == '-':
-                        t = self.tipo_expressao(ctx.fator())
-                        if t in ('inteiro', 'real'): return t
-                        self.erros.append(f"Linha {ctx.start.line}: operacao de negacao unaria nao compativel com tipo '{t}'")
-                        return None
-                    elif first_child_text == 'nao':
-                        t = self.tipo_expressao(ctx.fator())
-                        if t == 'logico': return 'logico'
-                        self.erros.append(f"Linha {ctx.start.line}: operacao de negacao logica nao compativel com tipo '{t}'")
-                        return None
-                    elif first_child_text == '&': # '&' (IDENT | acesso_campo)
-                        operand_ctx = ctx.getChild(1) 
-                        # resolve_lvalue_type já trata a verificação de declaração para IDENT e acesso_campo
-                        resolved_type = self.resolve_lvalue_type(operand_ctx) 
-                        if resolved_type is None: # Erro já reportado por resolve_lvalue_type
-                            return None
-                        return 'endereco' # O resultado de '&' é sempre do tipo 'endereco'
-                    elif first_child_text == '^': # CIRCUNFLEXO IDENT
-                        ident_node = ctx.getChild(1) # O IDENT após CIRCUNFLEXO
-                        if isinstance(ident_node, TerminalNode) and ident_node.getSymbol().type == LAParser.IDENT:
-                            name = ident_node.getText()
-                            sym_entry = self.symbol_table.lookup_symbol(name)
-                            if sym_entry is None:
-                                self.erros.append(f"Linha {self.linha_token(ident_node.getSymbol())}: identificador {name} nao declarado")
-                                return None
-                            if not (isinstance(sym_entry.type_info, str) and sym_entry.type_info.startswith('^')):
-                                self.erros.append(f"Linha {self.linha_token(first_child.getSymbol())}: identificador {name} nao eh um ponteiro para ser desreferenciado")
-                                return None
-                            return sym_entry.type_info[1:] # Retorna o tipo base do ponteiro
-                        else:
-                            self.erros.append(f"Linha {self.linha_token(first_child.getSymbol())}: expressao invalida apos '^'")
-                            return None
-
-            # Parenthesized expression
-            if ctx.ABREPAR() and ctx.expressao() and ctx.FECHAPAR():
-                return self.tipo_expressao(ctx.expressao())
-
-            # Function calls and specific operations (potencia, subliteral)
-            if ctx.chamada_funcao():
-                return self.tipo_funcao(ctx.chamada_funcao())
-            
-            if ctx.potencia():
-                exp1_type = self.tipo_expressao(ctx.potencia().expressao(0))
-                exp2_type = self.tipo_expressao(ctx.potencia().expressao(1))
-
-                if exp1_type in ('inteiro', 'real') and exp2_type in ('inteiro', 'real'):
-                    return 'real' if 'real' in (exp1_type, exp2_type) else 'inteiro'
-                else:
-                    self.erros.append(f"Linha {ctx.start.line}: operacao 'pot' nao compativel com tipos '{exp1_type}' e '{exp2_type}'")
+            # Identificador
+            if ctx.IDENT():
+                nome = ctx.IDENT().getText()
+                # Verificar primeiro no escopo local, depois no global
+                tipo_var = self.simbolos_locais.get(nome) or self.simbolos.get(nome)
+                if tipo_var is None:
+                    self.erros.append(f"Linha {ctx.start.line}: identificador {nome} nao declarado")
                     return None
+                return tipo_var
 
-            if ctx.subliteral():
-                exp_type = self.tipo_expressao(ctx.subliteral().expressao())
-                if exp_type == 'literal':
-                    return 'literal'
-                else:
-                    self.erros.append(f"Linha {ctx.start.line}: operacao 'subLiteral' espera um literal como primeiro argumento, encontrado '{exp_type}'")
-                    return None
-
-            # Accessing fields
-            if ctx.acesso_campo():
-                return self.resolve_lvalue_type(ctx.acesso_campo())
-
-            # Simple identifiers/literals (last, as they are general and might be caught by other checks first)
-            if ctx.IDENT(): # This is for the simple 'IDENT' alternative in fator
-                return self.resolve_lvalue_type(ctx.IDENT()) # Passa o TerminalNode IDENT
-            
+            # Constantes numéricas
             if ctx.NUM_INT():
                 return 'inteiro'
             if ctx.NUM_REAL():
                 return 'real'
+
+            # Literal cadeia
             if ctx.CADEIA():
                 return 'literal'
-            if ctx.getText() in ('verdadeiro', 'falso'): # Booleans
+
+            # Verdadeiro ou falso (booleano)
+            if ctx.getText() in ('verdadeiro', 'falso'):
                 return 'logico'
 
-            return None # Fator not recognized, should indicate an error if reached here.
+            # Parênteses: desce para a expressao interna
+            if ctx.ABREPAR():
+                return self.tipo_expressao(ctx.expressao())
 
-        # Casos base para as regras de expressão (sempre devem descer para o próximo nível)
-        elif isinstance(ctx, LAParser.ExpressaoContext):
-            return self.tipo_expressao(ctx.expressao_logica())
-        elif isinstance(ctx, LAParser.Expressao_logicaContext):
-            # A regra expressao_logica pode ter mais de um expressao_relacional
-            # Se tiver apenas um, retorna o tipo dele.
-            if len(ctx.expressao_relacional()) > 0:
-                return self.tipo_expressao(ctx.expressao_relacional()[0])
-            return None # Nenhuma expressao relacional, erro ou expressao vazia
-        elif isinstance(ctx, LAParser.Expressao_relacionalContext):
-            # A regra expressao_relacional sempre tem pelo menos um expressao_aritmetica
-            return self.tipo_expressao(ctx.expressao_aritmetica(0))
-        elif isinstance(ctx, LAParser.Expressao_aritmeticaContext):
-            # A regra expressao_aritmetica sempre tem pelo menos um termo
-            return self.tipo_expressao(ctx.termo()[0])
-        elif isinstance(ctx, LAParser.TermoContext):
-            # A regra termo sempre tem pelo menos um fator
-            return self.tipo_expressao(ctx.fator()[0])
+            # Negação unária (- fator)
+            if ctx.getChildCount() == 2 and ctx.getChild(0).getText() == '-':
+                return self.tipo_expressao(ctx.fator())
+
+            # Negação lógica (nao fator)
+            if ctx.getChildCount() == 2 and ctx.getChild(0).getText().lower() == 'nao':
+                t = self.tipo_expressao(ctx.fator())
+                return 'logico' if t == 'logico' else None
+
+            # Endereçamento (& IDENT ou acesso_campo)
+            if ctx.getChildCount() == 2 and ctx.getChild(0).getText() == '&':
+                # Endereço: aceita qualquer tipo, retorna 'endereco' ou None conforme sua definição
+                return 'endereco'
+
+            # Potência (CIRCUNFLEXO IDENT)
+            if ctx.CIRCUNFLEXO():
+                # Depende da declaração da variável
+                nome = ctx.IDENT().getText()
+                return self.simbolos.get(nome)
+
+            # chamada_funcao (implemente se necessário)
+            if ctx.chamada_funcao():
+                # Deve retornar o tipo do resultado da função
+                return self.tipo_funcao(ctx.chamada_funcao())
+
+            # acesso_campo (implemente se necessário)
+            if ctx.acesso_campo():
+                return self.tipo_acesso_campo(ctx.acesso_campo())
+
+            # acesso_array (implementar suporte para arrays)
+            if hasattr(ctx, 'acesso_array') and ctx.acesso_array():
+                return self.tipo_acesso_array(ctx.acesso_array())
+
+            # Se não reconhecer, retorna None
+            return None
+
+        else:
+            # Contexto não tratado
+            return None
+
+        # Adicionar suporte para acesso_campo diretamente
+        if isinstance(ctx, LAParser.Acesso_campoContext):
+            return self.tipo_acesso_campo(ctx)
         
-        return None # Tipo desconhecido ou erro
+        # Adicionar suporte para acesso_array diretamente
+        if hasattr(LAParser, 'Acesso_arrayContext') and isinstance(ctx, LAParser.Acesso_arrayContext):
+            return self.tipo_acesso_array(ctx)
 
+    def tipo_acesso_campo(self, ctx):
+        """Determina o tipo de um acesso a campo como variavel.campo"""
+        if hasattr(ctx, 'IDENT') and ctx.IDENT():
+            nome_var = ctx.IDENT(0).getText()
+            nome_campo = ctx.IDENT(1).getText()
+            
+            # Verificar se a variável existe (primeiro local, depois global)
+            if nome_var not in self.simbolos_locais and nome_var not in self.simbolos:
+                self.erros.append(f"Linha {ctx.start.line}: identificador {nome_var}.{nome_campo} nao declarado")
+                return None
+            
+            # Verificar se a variável tem campos (é um registro)
+            if nome_var in self.campos_registro:
+                campos = self.campos_registro[nome_var]
+                if nome_campo in campos:
+                    return campos[nome_campo]
+                else:
+                    self.erros.append(f"Linha {ctx.start.line}: identificador {nome_var}.{nome_campo} nao declarado")
+                    return None
+            else:
+                # Variável não é um registro
+                self.erros.append(f"Linha {ctx.start.line}: identificador {nome_var}.{nome_campo} nao declarado")
+                return None
+        return None
 
-    # --- Métodos Listener para Verificações Semânticas ---
+    def tipo_acesso_array(self, ctx):
+        """Determina o tipo de um acesso a array como variavel[indice]"""
+        if hasattr(ctx, 'IDENT') and ctx.IDENT():
+            nome_var = ctx.IDENT().getText()
+            
+            # Verificar se a variável existe
+            if nome_var not in self.simbolos:
+                self.erros.append(f"Linha {ctx.start.line}: identificador {nome_var} nao declarado")
+                return None
+            
+            # Verificar se o índice é um inteiro
+            tipo_indice = self.tipo_expressao(ctx.expressao())
+            if tipo_indice != 'inteiro':
+                # Não reportar erro aqui, apenas retornar None para indicar problema
+                pass
+            
+            # Retornar o tipo base do array (assumindo que arrays são do mesmo tipo dos elementos)
+            return self.simbolos_locais.get(nome_var) or self.simbolos.get(nome_var)
+        return None
 
-    # Gerenciamento de escopo para o programa principal.
-    def enterPrograma(self, ctx:LAParser.ProgramaContext):
-        self.symbol_table.push_scope() # Inicia o escopo global.
+    def tipo_funcao(self, ctx):
+        """Determina o tipo de retorno de uma chamada de função e valida parâmetros"""
+        if hasattr(ctx, 'IDENT') and ctx.IDENT():
+            nome_funcao = ctx.IDENT().getText()
+            
+            # Verificar se a função existe
+            if nome_funcao not in self.funcoes:
+                self.erros.append(f"Linha {ctx.start.line}: identificador {nome_funcao} nao declarado")
+                return None
+            
+            # Obter informações da função
+            info_funcao = self.funcoes[nome_funcao]
+            parametros_esperados = info_funcao['parametros']
+            
+            # Verificar parâmetros passados
+            parametros_passados = []
+            if ctx.lista_expressao():
+                for exp in ctx.lista_expressao().expressao():
+                    tipo_param = self.tipo_expressao(exp)
+                    parametros_passados.append(tipo_param)
+            
+            # Validar número de parâmetros
+            if len(parametros_passados) != len(parametros_esperados):
+                self.erros.append(f"Linha {ctx.start.line}: incompatibilidade de parametros na chamada de {nome_funcao}")
+                return info_funcao['tipo_retorno']
+            
+            # Validar tipos dos parâmetros
+            for i, (tipo_passado, (_, tipo_esperado)) in enumerate(zip(parametros_passados, parametros_esperados)):
+                if tipo_passado and tipo_passado != tipo_esperado:  # Exigir compatibilidade exata para parâmetros
+                    self.erros.append(f"Linha {ctx.start.line}: incompatibilidade de parametros na chamada de {nome_funcao}")
+                    break
+            
+            return info_funcao['tipo_retorno']
+        return None
 
-    def exitPrograma(self, ctx:LAParser.ProgramaContext):
-        self.symbol_table.pop_scope() # Sai do escopo global.
+    
+    def eh_compatível(self, tipo_var, tipo_exp):
+        if tipo_var == tipo_exp:
+            return True
+        # Permitir atribuir inteiro para real
+        if tipo_var == 'real' and tipo_exp == 'inteiro':
+            return True
+        return False
 
-    # Gerenciamento de escopo e declaração para procedimentos.
-    def enterDeclaracao_procedimento(self, ctx:LAParser.Declaracao_procedimentoContext):
-        nome_proc = ctx.IDENT().getText()
-        line = self.linha_token(ctx.IDENT().getSymbol())
+    def enterAtribuicao(self, ctx:LAParser.AtribuicaoContext):
+        # Identificar o lado esquerdo da atribuição
+        lado_esquerdo = ctx.getChild(0)
+        lado_esquerdo_texto = lado_esquerdo.getText()
         
-        # Coleta os tipos dos parâmetros para a assinatura do procedimento.
-        params = []
-        if ctx.parametros():
-            for param_ctx in ctx.parametros().parametro():
-                param_type = None
-                # A regra 'parametro' é 'IDENT ':' (tipo_base | tipo_identificado)'
-                if param_ctx.tipo_base():
-                    param_type = param_ctx.tipo_base().getText()
-                elif param_ctx.tipo_identificado():
-                    param_type = param_ctx.tipo_identificado().getText()
+        # Debug: print info about the left side
+        # print(f"Debug: lado_esquerdo_texto = '{lado_esquerdo_texto}'")
+        # print(f"Debug: lado_esquerdo type = {type(lado_esquerdo)}")
+        # print(f"Debug: lado_esquerdo children = {lado_esquerdo.getChildCount()}")
+        
+        # Verificar se é um ponteiro (^IDENT) - o primeiro filho é ^ e o segundo é IDENT
+        if lado_esquerdo_texto == '^':
+            # É um ponteiro dereference: ^ponteiro
+            # O identificador do ponteiro está no segundo filho
+            ident_node = ctx.getChild(1)
+            nome_ponteiro = ident_node.getText()
+            tipo_ponteiro = self.simbolos_locais.get(nome_ponteiro) or self.simbolos.get(nome_ponteiro)
+            nome_var = f"^{nome_ponteiro}"  # ^ponteiro
+            token_var = ident_node.getSymbol()
+            
+            if tipo_ponteiro is None:
+                # Ponteiro não declarado
+                self.erros.append(f"Linha {token_var.line}: identificador {nome_ponteiro} nao declarado")
+                return  # Sair cedo se ponteiro não declarado
+            else:
+                # O tipo da variável apontada é o tipo do ponteiro
+                tipo_var = tipo_ponteiro
+        elif hasattr(lado_esquerdo, 'getSymbol'):  # É um terminal (IDENT)
+            nome_var = lado_esquerdo.getText()
+            tipo_var = self.simbolos_locais.get(nome_var) or self.simbolos.get(nome_var)
+            token_var = lado_esquerdo.getSymbol()
+            
+            if tipo_var is None:
+                self.erros.append(f"Linha {token_var.line}: identificador {nome_var} nao declarado")
+                return
+        elif hasattr(lado_esquerdo, 'IDENT') and lado_esquerdo.IDENT():  # É acesso_campo ou acesso_array
+            nome_var = lado_esquerdo.getText()
+            
+            # Verificar se é acesso a array (tem colchetes)
+            if hasattr(lado_esquerdo, 'ABRE_COLCHETE'):
+                # É acesso a array
+                tipo_var = self.tipo_acesso_array(lado_esquerdo)
+                token_var = lado_esquerdo.IDENT().getSymbol()
+            else:
+                # É acesso a campo
+                tipo_var = self.tipo_acesso_campo(lado_esquerdo)
+                token_var = lado_esquerdo.IDENT(0).getSymbol()
+            
+            # Se tipo_var é None, o erro já foi reportado nos métodos específicos
+            if tipo_var is None:
+                return
+        else:
+            # Caso não identificado
+            nome_var = lado_esquerdo.getText()
+            tipo_var = None
+            token_var = ctx.start
+            self.erros.append(f"Linha {token_var.line}: identificador {nome_var} nao declarado")
+            return
+
+        # Verificar tipo da expressão do lado direito
+        tipo_exp = self.tipo_expressao(ctx.expressao())
+
+        # Comparar tipos (apenas se ambos os tipos forem conhecidos)
+        if tipo_var is not None and tipo_exp is not None and not self.eh_compatível(tipo_var, tipo_exp):
+            if hasattr(token_var, 'line'):
+                linha = token_var.line
+            else:
+                linha = ctx.start.line
+            self.erros.append(f"Linha {linha}: atribuicao nao compativel para {nome_var}")
+
+    # Captura variáveis declaradas na regra "declaracao"
+    def enterDeclaracoes_locais(self, ctx:LAParser.Declaracoes_locaisContext):
+        # Process each 'declare lista_variaveis' inside the declaracoes_locais
+        # According to the grammar: declaracoes_locais : ('declare' lista_variaveis)+
+        
+        # Get all lista_variaveis children
+        if hasattr(ctx, 'lista_variaveis'):
+            for lista_vars in ctx.lista_variaveis():
+                self.process_lista_variaveis(lista_vars)
+
+    def extract_variable_names(self, var_ctx):
+        """Extract only the variable names from a variavel context, ignoring array size expressions"""
+        variable_names = []
+        
+        # The grammar is: IDENT (ABRE_COLCHETE (NUM_INT | IDENT) FECHA_COLCHETE)? (',' IDENT (ABRE_COLCHETE (NUM_INT | IDENT) FECHA_COLCHETE)?)* ':' tipo
+        # We need to identify which IDENT tokens are variable names vs array sizes
+        
+        # Parse the children to identify the structure
+        children = [var_ctx.getChild(i) for i in range(var_ctx.getChildCount())]
+        
+        i = 0
+        while i < len(children):
+            child = children[i]
+            
+            # Look for IDENT tokens
+            if hasattr(child, 'getSymbol') and child.getSymbol().type == LALexer.IDENT:
+                # This is a variable name
+                variable_names.append(child.getText())
                 
-                param_name = param_ctx.IDENT().getText()
-                param_line = self.linha_token(param_ctx.IDENT().getSymbol())
+                # Skip over potential array bracket section
+                if i + 1 < len(children) and hasattr(children[i + 1], 'getSymbol') and children[i + 1].getSymbol().type == LALexer.ABRE_COLCHETE:
+                    # Skip [, array_size, ]
+                    i += 3  # Skip ABRE_COLCHETE, array_size, FECHA_COLCHETE
+                else:
+                    i += 1
+            elif hasattr(child, 'getText') and child.getText() == ',':
+                # Skip comma
+                i += 1
+            else:
+                # Skip other tokens like ':'
+                i += 1
                 
-                if param_type:
-                    params.append(param_type)
+        return variable_names
 
-        # Declara o procedimento no escopo atual (escopo englobante).
-        if not self.symbol_table.declare_symbol(nome_proc, 'procedimento', {'parametros': params, 'retorno': 'void'}, line):
-            self.erros.append(f"Linha {line}: identificador {nome_proc} ja declarado anteriormente")
+    def process_lista_variaveis(self, lista_vars_ctx):
+        """Helper method to process lista_variaveis in any context"""
+        for var_ctx in lista_vars_ctx.variavel():
+            self.process_variavel(var_ctx)
 
-        # Entra em um novo escopo para os parâmetros do procedimento e variáveis locais.
-        self.symbol_table.push_scope()
-        self.in_function_or_procedure += 1 # Incrementa contador de escopo de função/proc
-
-        # Declara os parâmetros no novo escopo (do procedimento).
-        if ctx.parametros():
-            for param_ctx in ctx.parametros().parametro():
-                param_name = param_ctx.IDENT().getText()
-                param_line = self.linha_token(param_ctx.IDENT().getSymbol())
-                param_type = None
-                if param_ctx.tipo_base():
-                    param_type = param_ctx.tipo_base().getText()
-                elif param_ctx.tipo_identificado():
-                    param_type = param_ctx.tipo_identificado().getText()
-
-                if param_type:
-                    if not self.symbol_table.declare_symbol(param_name, 'parametro', param_type, param_line):
-                        self.erros.append(f"Linha {param_line}: identificador {param_name} ja declarado anteriormente (parametro)")
-
-    def exitDeclaracao_procedimento(self, ctx:LAParser.Declaracao_procedimentoContext):
-        self.symbol_table.pop_scope() # Sai do escopo do procedimento.
-        self.in_function_or_procedure -= 1 # Decrementa contador
-
-    # Gerenciamento de escopo e declaração para funções.
-    def enterDeclaracao_funcao(self, ctx:LAParser.Declaracao_funcaoContext):
-        nome_func = ctx.IDENT().getText()
-        line = self.linha_token(ctx.IDENT().getSymbol())
-        return_type = ctx.tipo_base().getText() # Regra funcao: 'funcao' IDENT ... ':' tipo_base
-
-        # Coleta os tipos dos parâmetros.
-        params = []
-        if ctx.parametros():
-            for param_ctx in ctx.parametros().parametro():
-                param_type = None
-                if param_ctx.tipo_base():
-                    param_type = param_ctx.tipo_base().getText()
-                elif param_ctx.tipo_identificado():
-                    param_type = param_ctx.tipo_identificado().getText()
+    def process_variavel(self, var_ctx):
+        """Helper method to process a single variavel declaration"""
+        tipo_ctx = var_ctx.tipo()
+        
+        # Verificar se tipo_ctx não é None
+        if tipo_ctx is None:
+            return
+        
+        # Verificar se é um tipo registro
+        if hasattr(tipo_ctx, 'tipo_registro') and tipo_ctx.tipo_registro():
+            # É um tipo registro - processar campos
+            registro_ctx = tipo_ctx.tipo_registro()
+            tipo_texto = 'registro'
+            
+            # Armazenar campos do registro para cada variável
+            campos = {}
+            for campo_ctx in registro_ctx.lista_campos().campo():
+                tipo_campo = campo_ctx.tipo_base().getText().replace("^", "")
+                if tipo_campo not in TIPOS_VALIDOS:
+                    token_tipo = campo_ctx.tipo_base().start
+                    self.erros.append(f"Linha {self.linha_token(token_tipo)}: tipo {tipo_campo} nao declarado")
                 
-                if param_type:
-                    params.append(param_type)
+                # Adicionar todos os identificadores do campo
+                for j in range(campo_ctx.IDENT().__len__()):
+                    nome_campo = campo_ctx.IDENT(j).getText()
+                    campos[nome_campo] = tipo_campo
+            
+            # Registrar cada variável do tipo registro
+            for i in range(var_ctx.IDENT().__len__()):
+                nome_var = var_ctx.IDENT(i).getText()
+                # Verificar conflitos baseado no escopo atual
+                conflict_found = False
+                if self.escopo_atual in ['funcao', 'procedimento']:
+                    if nome_var in self.simbolos_locais or nome_var in self.simbolos:
+                        conflict_found = True
+                else:
+                    if nome_var in self.simbolos:
+                        conflict_found = True
+                
+                if conflict_found:
+                    token_var = var_ctx.IDENT(i).getSymbol()
+                    self.erros.append(f"Linha {self.linha_token(token_var)}: identificador {nome_var} ja declarado anteriormente")
+                else:
+                    # Escolher o escopo correto
+                    if self.escopo_atual in ['funcao', 'procedimento']:
+                        self.simbolos_locais[nome_var] = tipo_texto
+                    else:
+                        self.simbolos[nome_var] = tipo_texto
+                    self.campos_registro[nome_var] = campos
+        else:
+            # Tipo simples, ponteiro, ou tipo definido pelo usuário
+            if hasattr(tipo_ctx, 'tipo_base') and tipo_ctx.tipo_base():
+                tipo_texto = tipo_ctx.tipo_base().getText().replace("^", "")
+            elif hasattr(tipo_ctx, 'tipo_identificado') and tipo_ctx.tipo_identificado():
+                tipo_texto = tipo_ctx.tipo_identificado().getText().replace("^", "")
+            else:
+                tipo_texto = tipo_ctx.getText().replace("^", "")
+            
+            # Verificar se é um tipo válido (primitivo ou definido pelo usuário)
+            if tipo_texto not in TIPOS_VALIDOS and tipo_texto not in self.tipos_definidos:
+                token_tipo = tipo_ctx.start
+                self.erros.append(f"Linha {self.linha_token(token_tipo)}: tipo {tipo_texto} nao declarado")
+            
+            # Registrar cada variável
+            for i in range(var_ctx.IDENT().__len__()):
+                nome_var = var_ctx.IDENT(i).getText()
+                # Verificar conflito com variáveis já declaradas, tipos, funções ou procedimentos
+                # Mas ignore conflitos com constantes (elas podem ser usadas em tamanhos de array)
+                conflict_found = False
+                
+                # Verificar no escopo atual
+                if self.escopo_atual in ['funcao', 'procedimento']:
+                    # Em escopo local, verificar conflitos locais e globais
+                    if ((nome_var in self.simbolos_locais) or 
+                        (nome_var in self.simbolos) or 
+                        nome_var in self.tipos_definidos or 
+                        nome_var in self.funcoes or 
+                        nome_var in self.procedimentos or
+                        nome_var in self.constantes):
+                        conflict_found = True
+                else:
+                    # Em escopo global, verificar apenas conflitos globais
+                    if ((nome_var in self.simbolos) or 
+                        nome_var in self.tipos_definidos or 
+                        nome_var in self.funcoes or 
+                        nome_var in self.procedimentos or
+                        nome_var in self.constantes):
+                        conflict_found = True
+                
+                if conflict_found:
+                    # Find the correct token for the variable name
+                    token_var = None
+                    for j in range(var_ctx.IDENT().__len__()):
+                        if var_ctx.IDENT(j).getText() == nome_var:
+                            token_var = var_ctx.IDENT(j).getSymbol()
+                            break
+                    if token_var:
+                        self.erros.append(f"Linha {self.linha_token(token_var)}: identificador {nome_var} ja declarado anteriormente")
+                elif nome_var not in self.constantes:  # Só declare como variável se não for uma constante
+                    # Escolher o escopo correto baseado no escopo atual
+                    if self.escopo_atual in ['funcao', 'procedimento']:
+                        self.simbolos_locais[nome_var] = tipo_texto
+                    else:
+                        self.simbolos[nome_var] = tipo_texto
+                    # Se for um tipo registro definido pelo usuário, copiar seus campos
+                    if tipo_texto in self.tipos_definidos and tipo_texto in self.campos_registro:
+                        self.campos_registro[nome_var] = self.campos_registro[tipo_texto]
 
-        # Declara a função no escopo atual (englobante).
-        if not self.symbol_table.declare_symbol(nome_func, 'funcao', {'parametros': params, 'retorno': return_type}, line):
-            self.erros.append(f"Linha {line}: identificador {nome_func} ja declarado anteriormente")
-
-        # Entra em um novo escopo para os parâmetros da função e variáveis locais.
-        self.symbol_table.push_scope()
-        self.in_function_or_procedure += 1
-        self.current_function_return_type = return_type # Define o tipo de retorno esperado para 'retorne'
-
-        # Declara os parâmetros no novo escopo (da função).
-        if ctx.parametros():
-            for param_ctx in ctx.parametros().parametro():
-                param_name = param_ctx.IDENT().getText()
-                param_line = self.linha_token(param_ctx.IDENT().getSymbol())
-                param_type = None
-                if param_ctx.tipo_base():
-                    param_type = param_ctx.tipo_base().getText()
-                elif param_ctx.tipo_identificado():
-                    param_type = param_ctx.tipo_identificado().getText()
-
-                if param_type:
-                    if not self.symbol_table.declare_symbol(param_name, 'parametro', param_type, param_line):
-                        self.erros.append(f"Linha {param_line}: identificador {param_name} ja declarado anteriormente (parametro)")
-
-    def exitDeclaracao_funcao(self, ctx:LAParser.Declaracao_funcaoContext):
-        self.symbol_table.pop_scope() # Sai do escopo da função.
-        self.in_function_or_procedure -= 1
-        self.current_function_return_type = None # Reseta o tipo de retorno esperado.
-
-    # Lida com a declaração de variáveis (apenas 'declare lista_variaveis').
     def enterDeclaracao(self, ctx:LAParser.DeclaracaoContext):
-        # A lógica detalhada de variáveis é movida para enterVariavel
-        pass # Não faz nada aqui, deixa para enterVariavel.
+        for var_ctx in ctx.lista_variaveis().variavel():
+            tipo_ctx = var_ctx.tipo()
+            
+            # Verificar se tipo_ctx não é None
+            if tipo_ctx is None:
+                continue
+            
+            # Verificar se é um tipo registro
+            if hasattr(tipo_ctx, 'tipo_registro') and tipo_ctx.tipo_registro():
+                # É um tipo registro - processar campos
+                registro_ctx = tipo_ctx.tipo_registro()
+                tipo_texto = 'registro'
+                
+                # Armazenar campos do registro para cada variável
+                campos = {}
+                for campo_ctx in registro_ctx.lista_campos().campo():
+                    tipo_campo = campo_ctx.tipo_base().getText().replace("^", "")
+                    if tipo_campo not in TIPOS_VALIDOS:
+                        token_tipo = campo_ctx.tipo_base().start
+                        self.erros.append(f"Linha {self.linha_token(token_tipo)}: tipo {tipo_campo} nao declarado")
+                    
+                    # Adicionar todos os identificadores do campo
+                    for j in range(campo_ctx.IDENT().__len__()):
+                        nome_campo = campo_ctx.IDENT(j).getText()
+                        campos[nome_campo] = tipo_campo
+                
+                # Registrar cada variável do tipo registro
+                for i in range(var_ctx.IDENT().__len__()):
+                    nome_var = var_ctx.IDENT(i).getText()
+                    # Verificar conflitos baseado no escopo atual
+                    conflict_found = False
+                    if self.escopo_atual in ['funcao', 'procedimento']:
+                        if nome_var in self.simbolos_locais or nome_var in self.simbolos:
+                            conflict_found = True
+                    else:
+                        if nome_var in self.simbolos:
+                            conflict_found = True
+                    
+                    if conflict_found:
+                        token_var = var_ctx.IDENT(i).getSymbol()
+                        self.erros.append(f"Linha {self.linha_token(token_var)}: identificador {nome_var} ja declarado anteriormente")
+                    else:
+                        # Escolher o escopo correto
+                        if self.escopo_atual in ['funcao', 'procedimento']:
+                            self.simbolos_locais[nome_var] = tipo_texto
+                        else:
+                            self.simbolos[nome_var] = tipo_texto
+                        self.campos_registro[nome_var] = campos
+            else:
+                # Tipo simples, ponteiro, ou tipo definido pelo usuário
+                if hasattr(tipo_ctx, 'tipo_base') and tipo_ctx.tipo_base():
+                    tipo_texto = tipo_ctx.tipo_base().getText().replace("^", "")
+                elif hasattr(tipo_ctx, 'tipo_identificado') and tipo_ctx.tipo_identificado():
+                    tipo_texto = tipo_ctx.tipo_identificado().getText().replace("^", "")
+                else:
+                    tipo_texto = tipo_ctx.getText().replace("^", "")
+                
+                # Verificar se é um tipo válido (primitivo ou definido pelo usuário)
+                if tipo_texto not in TIPOS_VALIDOS and tipo_texto not in self.tipos_definidos:
+                    token_tipo = tipo_ctx.start
+                    self.erros.append(f"Linha {self.linha_token(token_tipo)}: tipo {tipo_texto} nao declarado")
+                
+                # Registrar cada variável
+                # Need to carefully parse the variable structure to distinguish between
+                # variable names and array size expressions
+                var_names = self.extract_variable_names(var_ctx)
+                
+                for nome_var in var_names:
+                    # Verificar conflito com variáveis já declaradas, tipos, funções ou procedimentos
+                    # Mas ignore conflitos com constantes (elas podem ser usadas em tamanhos de array)
+                    conflict_found = False
+                    
+                    # Verificar no escopo atual
+                    if self.escopo_atual in ['funcao', 'procedimento']:
+                        # Em escopo local, verificar conflitos locais e globais
+                        if ((nome_var in self.simbolos_locais) or 
+                            (nome_var in self.simbolos) or 
+                            nome_var in self.tipos_definidos or 
+                            nome_var in self.funcoes or 
+                            nome_var in self.procedimentos or
+                            nome_var in self.constantes):
+                            conflict_found = True
+                    else:
+                        # Em escopo global, verificar apenas conflitos globais
+                        if ((nome_var in self.simbolos) or 
+                            nome_var in self.tipos_definidos or 
+                            nome_var in self.funcoes or 
+                            nome_var in self.procedimentos or
+                            nome_var in self.constantes):
+                            conflict_found = True
+                    
+                    if conflict_found:
+                        # Find the correct token for the variable name
+                        token_var = None
+                        for j in range(var_ctx.IDENT().__len__()):
+                            if var_ctx.IDENT(j).getText() == nome_var:
+                                token_var = var_ctx.IDENT(j).getSymbol()
+                                break
+                        if token_var:
+                            self.erros.append(f"Linha {self.linha_token(token_var)}: identificador {nome_var} ja declarado anteriormente")
+                    elif nome_var not in self.constantes:  # Só declare como variável se não for uma constante
+                        # Escolher o escopo correto baseado no escopo atual
+                        if self.escopo_atual in ['funcao', 'procedimento']:
+                            self.simbolos_locais[nome_var] = tipo_texto
+                        else:
+                            self.simbolos[nome_var] = tipo_texto
+                        # Se for um tipo registro definido pelo usuário, copiar seus campos
+                        if tipo_texto in self.tipos_definidos and tipo_texto in self.campos_registro:
+                            self.campos_registro[nome_var] = self.campos_registro[tipo_texto]
 
-    # Lida com a declaração de constantes.
-    def enterDeclaracao_constante(self, ctx:LAParser.Declaracao_constanteContext):
-        nome_const = ctx.IDENT().getText()
-        line = self.linha_token(ctx.IDENT().getSymbol())
-        tipo_const_text = ctx.tipo_base().getText() # Usa tipo_base na constante
-        
-        # Infere o tipo do valor literal atribuído à constante.
-        valor_ctx = ctx.valor_constante()
-        inferred_type = None
-        if valor_ctx.CADEIA(): inferred_type = 'literal'
-        elif valor_ctx.NUM_INT(): inferred_type = 'inteiro'
-        elif valor_ctx.NUM_REAL(): inferred_type = 'real'
-        elif valor_ctx.getText() in ('verdadeiro', 'falso'): inferred_type = 'logico'
-
-        # Verifica a compatibilidade de atribuição para a inicialização da constante.
-        if not self.eh_compativel_atribuicao(tipo_const_text, inferred_type):
-            self.erros.append(f"Linha {line}: atribuicao nao compativel para constante {nome_const}")
-
-        # Declara a constante no escopo atual.
-        if not self.symbol_table.declare_symbol(nome_const, 'constante', tipo_const_text, line):
-            self.erros.append(f"Linha {line}: identificador {nome_const} ja declarado anteriormente")
-
-    # Lida com a declaração de tipos (registros ou aliases).
+    # Captura tipos definidos na regra "declaracao_tipo"
     def enterDeclaracao_tipo(self, ctx:LAParser.Declaracao_tipoContext):
         nome_tipo = ctx.IDENT().getText()
-        line = self.linha_token(ctx.IDENT().getSymbol())
-
-        # Não permite declarar um tipo com o mesmo nome de um tipo primitivo.
-        if nome_tipo in TIPOS_PRIMITIVOS:
-            self.erros.append(f"Linha {line}: identificador {nome_tipo} ja declarado anteriormente (nome de tipo primitivo)")
-
-        # Verifica se o nome do tipo já está declarado no escopo atual.
-        if nome_tipo in self.symbol_table.get_current_scope_symbols():
-            self.erros.append(f"Linha {line}: identificador {nome_tipo} ja declarado anteriormente")
+        
+        # Verificar se o tipo já foi declarado
+        if nome_tipo in self.tipos_definidos or nome_tipo in self.simbolos:
+            token_tipo = ctx.IDENT().getSymbol()
+            self.erros.append(f"Linha {self.linha_token(token_tipo)}: identificador {nome_tipo} ja declarado anteriormente")
         else:
-            type_info = {}
-            if ctx.tipo_registro(): # Se for um tipo de registro.
-                record_fields = {}
-                lista_campos_ctx = None
+            # Registrar o tipo
+            self.tipos_definidos[nome_tipo] = 'tipo_personalizado'
+            
+            # Se for um tipo registro, processar seus campos
+            if hasattr(ctx, 'tipo_registro') and ctx.tipo_registro():
+                campos = {}
+                registro_ctx = ctx.tipo_registro()
+                for campo_ctx in registro_ctx.lista_campos().campo():
+                    tipo_campo = campo_ctx.tipo_base().getText().replace("^", "")
+                    if tipo_campo not in TIPOS_VALIDOS:
+                        token_tipo = campo_ctx.tipo_base().start
+                        self.erros.append(f"Linha {self.linha_token(token_tipo)}: tipo {tipo_campo} nao declarado")
+                    
+                    # Adicionar todos os identificadores do campo
+                    for j in range(campo_ctx.IDENT().__len__()):
+                        nome_campo = campo_ctx.IDENT(j).getText()
+                        campos[nome_campo] = tipo_campo
                 
-                # Debug print: What is the child at index 1 of tipo_registro context?
-                if len(ctx.tipo_registro().children) > 1:
-                    potential_lista_campos_child = ctx.tipo_registro().getChild(1)
-                    print(f"DEBUG: enterDeclaracao_tipo - tipo_registro child[1] type: {type(potential_lista_campos_child)}")
-                    if isinstance(potential_lista_campos_child, ParserRuleContext):
-                        print(f"DEBUG: enterDeclaracao_tipo - tipo_registro child[1] rule index: {potential_lista_campos_child.getRuleIndex()}")
-                        print(f"DEBUG: enterDeclaracao_tipo - LAParser.RULE_lista_campos: {LAParser.RULE_lista_campos if hasattr(LAParser, 'RULE_lista_campos') else 'NOT FOUND (hasattr check)'}")
-                        
-                        if hasattr(LAParser, 'RULE_lista_campos') and potential_lista_campos_child.getRuleIndex() == LAParser.RULE_lista_campos:
-                            lista_campos_ctx = potential_lista_campos_child
-                        # Fallback to check by class name string if Rule Index fails (less reliable but for debug/fallback)
-                        elif potential_lista_campos_child.__class__.__name__ == 'ListaCamposContext': 
-                            lista_campos_ctx = potential_lista_campos_child
-                
-                if lista_campos_ctx is None:
-                    # Original error message, now with more context provided by debug prints
-                    error_msg = f"Linha {self.linha_token(ctx.tipo_registro().start)}: Erro interno SEMÂNTICO CRÍTICO: Não foi possível localizar o contexto 'lista_campos' para a declaração de registro. Verifique a gramática 'LA.g4' e a geração/importação dos arquivos ANTLR Python. Recomenda-se regenerar os arquivos ANTLR novamente após uma limpeza completa."
-                    if 'potential_lista_campos_child' in locals():
-                        error_msg += f" (Debug: Child at index 1 was of type {type(potential_lista_campos_child).__name__} and text '{potential_lista_campos_child.getText() if hasattr(potential_lista_campos_child, 'getText') else 'N/A'}')"
+                # Armazenar os campos do tipo
+                self.campos_registro[nome_tipo] = campos
+
+    def enterDeclaracao_constante(self, ctx:LAParser.Declaracao_constanteContext):
+        nome_constante = ctx.IDENT().getText()
+        tipo_constante = ctx.tipo_base().getText().replace("^", "")
+        
+        # Verificar se a constante já foi declarada
+        if nome_constante in self.constantes or nome_constante in self.simbolos or nome_constante in self.tipos_definidos:
+            token_const = ctx.IDENT().getSymbol()
+            self.erros.append(f"Linha {self.linha_token(token_const)}: identificador {nome_constante} ja declarado anteriormente")
+        else:
+            # Registrar a constante
+            self.constantes[nome_constante] = tipo_constante
+            # Também adicionar ao símbolos para poder ser usada em expressões
+            self.simbolos[nome_constante] = tipo_constante
+
+    def enterDeclaracao_funcao(self, ctx:LAParser.Declaracao_funcaoContext):
+        nome_funcao = ctx.IDENT().getText()
+        tipo_retorno = ctx.tipo_base().getText().replace("^", "")
+        
+        # Verificar se a função já foi declarada
+        if nome_funcao in self.funcoes or nome_funcao in self.procedimentos or nome_funcao in self.simbolos:
+            token_funcao = ctx.IDENT().getSymbol()
+            self.erros.append(f"Linha {self.linha_token(token_funcao)}: identificador {nome_funcao} ja declarado anteriormente")
+        else:
+            # Extrair parâmetros
+            parametros = []
+            if ctx.parametros():
+                for param_ctx in ctx.parametros().parametro():
+                    nome_param = param_ctx.IDENT().getText()
+                    if param_ctx.tipo_base():
+                        tipo_param = param_ctx.tipo_base().getText().replace("^", "")
                     else:
-                        error_msg += f" (Debug: Child at index 1 not found or unexpected structure)"
-                    self.erros.append(error_msg)
-                    return # Não é possível prosseguir sem o contexto.
-
-                for campo_ctx in lista_campos_ctx.campo():
-                    # A regra 'campo' é: IDENT (',' IDENT)* ':' tipo_base
-                    field_type_text = campo_ctx.tipo_base().getText()
-                    for field_ident_token in campo_ctx.IDENT():
-                        field_name = field_ident_token.getText()
-                        field_line = self.linha_token(field_ident_token.getSymbol())
-                        
-                        # Verifica se o tipo base do campo está declarado (se não for primitivo).
-                        base_field_type = field_type_text.replace('^', '')
-                        if base_field_type not in TIPOS_PRIMITIVOS:
-                            sym_type_def = self.symbol_table.lookup_symbol(base_field_type)
-                            if sym_type_def is None:
-                                self.erros.append(f"Linha {self.linha_token(campo_ctx.tipo_base().start)}: tipo {base_field_type} nao declarado")
-                            elif sym_type_def.category != 'tipo':
-                                self.erros.append(f"Linha {self.linha_token(campo_ctx.tipo_base().start)}: identificador {base_field_type} nao eh um tipo valido")
-
-                        # Verifica por nomes de campo duplicados dentro do mesmo registro.
-                        if field_name in record_fields:
-                            self.erros.append(f"Linha {field_line}: identificador de campo {field_name} ja declarado no registro {nome_tipo}")
-                        record_fields[field_name] = {'type': field_type_text, 'line': field_line}
-                type_info = {'category': 'registro', 'campos': record_fields}
-
-            elif ctx.tipo_identificado(): # Se for um alias ou ponteiro para tipo.
-                target_type = ctx.tipo_identificado().getText()
-                is_pointer_type = target_type.startswith('^')
-                base_target_type = target_type.replace('^','')
-
-                # Verifica se o tipo alvo do alias/ponteiro está declarado.
-                if base_target_type not in TIPOS_PRIMITIVOS:
-                    sym_type_def = self.symbol_table.lookup_symbol(base_target_type)
-                    if sym_type_def is None:
-                        self.erros.append(f"Linha {self.linha_token(ctx.tipo_identificado().start)}: tipo {base_target_type} nao declarado")
-                    elif sym_type_def.category != 'tipo':
-                        self.erros.append(f"Linha {self.linha_token(ctx.tipo_identificado().start)}: identificador {base_target_type} nao eh um tipo valido")
-                
-                type_info = {'category': 'alias' if not is_pointer_type else 'ponteiro_para_tipo', 'target_type': target_type}
+                        tipo_param = param_ctx.tipo_identificado().getText().replace("^", "")
+                    parametros.append((nome_param, tipo_param))
             
-            self.symbol_table.declare_symbol(nome_tipo, 'tipo', type_info, line)
-
-    # Lida com a declaração individual de variáveis dentro de uma lista_variaveis.
-    def enterVariavel(self, ctx:LAParser.VariavelContext):
-        # A regra 'variavel' é: IDENT (',' IDENT)* :' tipo
-        declared_type_info = None
-        type_ctx = ctx.tipo() # Get the 'tipo' context
-
-        if isinstance(type_ctx, LAParser.TipoPrimitivoContext): # Usar isinstance para verificar o tipo do contexto
-            declared_type_info = type_ctx.getText() # e.g., 'inteiro', '^real'
-            base_declared_type = declared_type_info.replace('^','')
-            if base_declared_type not in TIPOS_PRIMITIVOS:
-                # Se não for um tipo primitivo, verifica se é um tipo declarado nomeado.
-                sym_type_def = self.symbol_table.lookup_symbol(base_declared_type)
-                if sym_type_def is None:
-                    self.erros.append(f"Linha {self.linha_token(type_ctx.start)}: tipo {base_declared_type} nao declarado")
-                    return # Não prossegue com tipo inválido.
-                elif sym_type_def.category != 'tipo':
-                    self.erros.append(f"Linha {self.linha_token(type_ctx.start)}: identificador {base_declared_type} nao eh um tipo valido")
-                    return
-
-
-        elif isinstance(type_ctx, LAParser.TipoIdentificadoContext): # Usar isinstance para verificar o tipo do contexto
-            declared_type_info = type_ctx.getText() # e.g., 'MeuTipo', '^OutroTipo'
-            base_declared_type = declared_type_info.replace('^','')
-            
-            # Verifica se o tipo identificado é um tipo declarado.
-            sym_type_def = self.symbol_table.lookup_symbol(base_declared_type)
-            if sym_type_def is None:
-                self.erros.append(f"Linha {self.linha_token(type_ctx.start)}: tipo {base_declared_type} nao declarado")
-                return
-            elif sym_type_def.category != 'tipo':
-                self.erros.append(f"Linha {self.linha_token(type_ctx.start)}: identificador {base_declared_type} nao eh um tipo valido")
-                return
-
-        elif isinstance(type_ctx, LAParser.TipoRegistroContext): # Usar isinstance para verificar o tipo do contexto
-            # Processa a definição de registro inline.
-            record_fields = {}
-            lista_campos_ctx = None
-            
-            # Debug print: What is the child at index 1 of tipo_registro context?
-            if len(type_ctx.children) > 1:
-                potential_lista_campos_child = type_ctx.getChild(1)
-                print(f"DEBUG: enterVariavel - tipo_registro child[1] type: {type(potential_lista_campos_child)}")
-                if isinstance(potential_lista_campos_child, ParserRuleContext):
-                    print(f"DEBUG: enterVariavel - tipo_registro child[1] rule index: {potential_lista_campos_child.getRuleIndex()}")
-                    print(f"DEBUG: enterVariavel - LAParser.RULE_lista_campos: {LAParser.RULE_lista_campos if hasattr(LAParser, 'RULE_lista_campos') else 'NOT FOUND (hasattr check)'}")
-                    
-                    if hasattr(LAParser, 'RULE_lista_campos') and potential_lista_campos_child.getRuleIndex() == LAParser.RULE_lista_campos:
-                        lista_campos_ctx = potential_lista_campos_child
-                    # Fallback to check by class name string if Rule Index fails (less reliable but for debug/fallback)
-                    elif potential_lista_campos_child.__class__.__name__ == 'ListaCamposContext': 
-                        lista_campos_ctx = potential_lista_campos_child
-
-            if lista_campos_ctx is None:
-                # Original error message, now with more context provided by debug prints
-                error_msg = f"Linha {self.linha_token(type_ctx.start)}: Erro interno SEMÂNTICO CRÍTICO: Não foi possível localizar o contexto 'lista_campos' para registro inline. Verifique a gramática 'LA.g4' e a geração/importação dos arquivos ANTLR Python. Recomenda-se regenerar os arquivos ANTLR novamente após uma limpeza completa."
-                if 'potential_lista_campos_child' in locals():
-                    error_msg += f" (Debug: Child at index 1 was of type {type(potential_lista_campos_child).__name__} and text '{potential_lista_campos_child.getText() if hasattr(potential_lista_campos_child, 'getText') else 'N/A'}')"
+            # Registrar a função
+            self.funcoes[nome_funcao] = {
+                'tipo_retorno': tipo_retorno,
+                'parametros': parametros
+            }
+        
+        # Entrar no escopo da função
+        self.escopo_atual = 'funcao'
+        self.simbolos_locais = {}
+        
+        # Adicionar parâmetros ao escopo local
+        if ctx.parametros():
+            for param_ctx in ctx.parametros().parametro():
+                nome_param = param_ctx.IDENT().getText()
+                if param_ctx.tipo_base():
+                    tipo_param = param_ctx.tipo_base().getText().replace("^", "")
                 else:
-                    error_msg += f" (Debug: Child at index 1 not found or unexpected structure)"
-                self.erros.append(error_msg)
-                return # Sai para evitar AttributeError
-
-            for campo_ctx in lista_campos_ctx.campo(): # Acessar .campo() diretamente do lista_campos_ctx
-                field_type_text = campo_ctx.tipo_base().getText() # Campos de registro usam tipo_base
-                for field_ident_token in campo_ctx.IDENT():
-                    field_name = field_ident_token.getText()
-                    field_line = self.linha_token(field_ident_token.getSymbol())
-                    
-                    base_field_type = field_type_text.replace('^', '')
-                    if base_field_type not in TIPOS_PRIMITIVOS:
-                        sym_type_def = self.symbol_table.lookup_symbol(base_field_type)
-                        if sym_type_def is None:
-                            self.erros.append(f"Linha {self.linha_token(campo_ctx.tipo_base().start)}: tipo {base_field_type} nao declarado")
-                        elif sym_type_def.category != 'tipo':
-                            self.erros.append(f"Linha {self.linha_token(campo_ctx.tipo_base().start)}: identificador {base_field_type} nao eh um tipo valido")
-
-                    if field_name in record_fields:
-                        self.erros.append(f"Linha {field_line}: identificador de campo {field_name} ja declarado no registro inline")
-                    record_fields[field_name] = {'type': field_type_text, 'line': field_line}
-            declared_type_info = {'category': 'registro_inline', 'campos': record_fields}
-
-        else: # Tipo não reconhecido para a regra 'tipo'
-            self.erros.append(f"Linha {self.linha_token(type_ctx.start)}: tipo invalido ou nao reconhecido")
-            return
-
-        # Agora declara as variáveis com a informação de tipo resolvida
-        for ident_token in ctx.IDENT():
-            nome_var = ident_token.getText()
-            line = self.linha_token(ident_token.getSymbol())
-            
-            # Tenta declarar o símbolo no escopo atual.
-            if not self.symbol_table.declare_symbol(nome_var, 'variavel', declared_type_info, line):
-                self.erros.append(f"Linha {line}: identificador {nome_var} ja declarado anteriormente")
-
-    # Verifica a atribuição.
-    def enterAtribuicao(self, ctx:LAParser.AtribuicaoContext):
-        # A regra de atribuição é: (IDENT | acesso_campo | CIRCUNFLEXO IDENT) ATRIBUICAO expressao
-        # O LHS pode ser o primeiro filho. Precisamos determinar o tipo desse primeiro filho.
-        lvalue_node = ctx.getChild(0)
-        lvalue_type = None
-        line = self.linha_token(ctx.start) # Linha do início da atribuição
-
-        if isinstance(lvalue_node, TerminalNode) and lvalue_node.getSymbol().type == LAParser.IDENT:
-            # Caso 1: IDENT simples
-            lvalue_type = self.resolve_lvalue_type(lvalue_node)
-            line = self.linha_token(lvalue_node.getSymbol())
-        elif isinstance(lvalue_node, LAParser.Acesso_campoContext):
-            # Caso 2: Acesso a campo
-            lvalue_type = self.resolve_lvalue_type(lvalue_node)
-            line = self.linha_token(lvalue_node.start)
-        elif isinstance(lvalue_node, TerminalNode) and lvalue_node.getSymbol().type == LAParser.CIRCUNFLEXO:
-            # Caso 3: Desreferenciação de ponteiro (^IDENT)
-            # O próximo filho deve ser o IDENT.
-            ident_node = ctx.getChild(1) # O IDENT após o CIRCUNFLEXO
-            if isinstance(ident_node, TerminalNode) and ident_node.getSymbol().type == LAParser.IDENT:
-                name = ident_node.getText()
-                sym_entry = self.symbol_table.lookup_symbol(name)
-                if sym_entry is None:
-                    self.erros.append(f"Linha {self.linha_token(ident_node.getSymbol())}: identificador {name} nao declarado")
-                    return # Sai, pois o lvalue é inválido
+                    tipo_param = param_ctx.tipo_identificado().getText().replace("^", "")
+                self.simbolos_locais[nome_param] = tipo_param
                 
-                # Verifica se o tipo da entrada é uma string e se começa com '^'
-                if not (isinstance(sym_entry.type_info, str) and sym_entry.type_info.startswith('^')):
-                    self.erros.append(f"Linha {self.linha_token(lvalue_node.getSymbol())}: identificador {name} nao eh um ponteiro para ser desreferenciado")
-                    return # Sai, pois o lvalue é inválido
-                
-                lvalue_type = sym_entry.type_info[1:] # Tipo base do ponteiro
-                line = self.linha_token(lvalue_node.getSymbol()) # Linha do circunflexo
-            else:
-                self.erros.append(f"Linha {self.linha_token(lvalue_node.getSymbol())}: expressao invalida apos '^'")
-                return # Sai
+                # Se o tipo é um registro definido pelo usuário, copiar seus campos
+                if tipo_param in self.tipos_definidos and tipo_param in self.campos_registro:
+                    self.campos_registro[nome_param] = self.campos_registro[tipo_param]
 
-        if lvalue_type is None: # Se um erro já foi relatado pelo l-value, apenas retorna.
-            return
+    def exitDeclaracao_funcao(self, ctx:LAParser.Declaracao_funcaoContext):
+        # Sair do escopo da função
+        self.escopo_atual = 'global'
+        self.simbolos_locais = {}
 
-        # Resolve o tipo da expressão no lado direito (R-value).
-        rvalue_type = self.tipo_expressao(ctx.expressao())
-
-        if rvalue_type is None: # Se um erro já foi relatado pela expressão, apenas retorna.
-            return
-
-        # Compara os tipos usando a função de compatibilidade aprimorada.
-        if not self.eh_compativel_atribuicao(lvalue_type, rvalue_type):
-            # Para a mensagem de erro, tente reconstruir o texto do l-value
-            lvalue_text = ""
-            if isinstance(lvalue_node, TerminalNode):
-                lvalue_text = lvalue_node.getText()
-                if lvalue_node.getSymbol().type == LAParser.CIRCUNFLEXO:
-                    lvalue_text += ctx.getChild(1).getText()
-            elif isinstance(lvalue_node, LAParser.Acesso_campoContext):
-                lvalue_text = lvalue_node.getText()
-
-
-            self.erros.append(f"Linha {line}: atribuicao nao compativel para {lvalue_text}")
-
-    # Verifica identificadores usados no comando 'leia'.
-    def enterLeitura(self, ctx:LAParser.LeituraContext):
-        if ctx.lista_identificadores():
-            # A regra 'lista_identificadores' é: (IDENT | acesso_campo) (',' (IDENT | acesso_campo))*
-            # Itera sobre os filhos para encontrar IDENT ou acesso_campo
-            for child in ctx.lista_identificadores().children:
-                if isinstance(child, TerminalNode) and child.getSymbol().type == LAParser.VIRG:
-                    continue # Ignora as vírgulas
-
-                # Determina o tipo do identificador usando resolve_lvalue_type
-                # Este método já reporta erros se o identificador não for declarado
-                self.resolve_lvalue_type(child) 
+    def enterDeclaracao_procedimento(self, ctx:LAParser.Declaracao_procedimentoContext):
+        nome_procedimento = ctx.IDENT().getText()
         
-    # Verifica expressões usadas no comando 'escreva'.
-    def enterEscrita(self, ctx:LAParser.EscritaContext):
-        for exp_ctx in ctx.expressao():
-            # Apenas resolve o tipo da expressão; 'tipo_expressao' já reporta erros internamente.
-            self.tipo_expressao(exp_ctx)
-
-    # Verifica a condição no comando 'enquanto'.
-    def enterComandoenquanto(self, ctx:LAParser.ComandoenquantoContext):
-        cond_type = self.tipo_expressao(ctx.expressao())
-        if cond_type is not None and cond_type != 'logico':
-            self.erros.append(f"Linha {self.linha_token(ctx.expressao().start)}: condicao do comando 'enquanto' nao eh do tipo logico. Encontrado '{cond_type}'")
-
-    # Verifica a condição no comando 'se'.
-    def enterComandose(self, ctx:LAParser.ComandoseContext):
-        cond_type = self.tipo_expressao(ctx.expressao())
-        if cond_type is not None and cond_type != 'logico':
-            self.erros.append(f"Linha {self.linha_token(ctx.expressao().start)}: condicao do comando 'se' nao eh do tipo logico. Encontrado '{cond_type}'")
-
-    # Verifica o comando 'retorne'.
-    def enterRetorne(self, ctx:LAParser.RetorneContext):
-        # 'retorne' só é permitido dentro de funções.
-        # Verifica se estamos em um escopo de função (onde 'current_function_return_type' é definido).
-        if self.in_function_or_procedure == 0 or self.current_function_return_type is None:
-            self.erros.append(f"Linha {self.linha_token(ctx.start)}: comando retorne nao permitido neste escopo")
-            return
-
-        # Se há uma expressão após 'retorne', verifica sua compatibilidade com o tipo de retorno da função.
-        if ctx.expressao():
-            return_exp_type = self.tipo_expressao(ctx.expressao())
-            if return_exp_type is None: return # Se a expressão já tem um erro, apenas retorna.
-
-            if not self.eh_compativel_atribuicao(self.current_function_return_type, return_exp_type):
-                self.erros.append(f"Linha {self.linha_token(ctx.start)}: tipo de retorno incompativel. Esperado '{self.current_function_return_type}', encontrado '{return_exp_type}'")
+        # Verificar se o procedimento já foi declarado
+        if nome_procedimento in self.procedimentos or nome_procedimento in self.funcoes or nome_procedimento in self.simbolos:
+            token_proc = ctx.IDENT().getSymbol()
+            self.erros.append(f"Linha {self.linha_token(token_proc)}: identificador {nome_procedimento} ja declarado anteriormente")
         else:
-            # Se 'retorne' é usado sem expressao, mas a função espera um tipo de retorno (não 'void').
-            # Assume-se que funções LA sempre retornam um tipo e não podem ser 'void' no sentido de C.
-            # Se o tipo de retorno esperado não é "void" (ou equivalente para "nada"), então é um erro.
-            if self.current_function_return_type != 'void': # 'void' é um marcador interno para procedimentos
-                self.erros.append(f"Linha {self.linha_token(ctx.start)}: comando retorne sem expressao em funcao que espera um retorno")
-
-    # Obtém o tipo de retorno de uma chamada de função e verifica a compatibilidade dos argumentos.
-    def tipo_funcao(self, ctx:LAParser.Chamada_funcaoContext):
-        nome_func = ctx.IDENT().getText()
-        line = self.linha_token(ctx.IDENT().getSymbol())
+            # Extrair parâmetros
+            parametros = []
+            if ctx.parametros():
+                for param_ctx in ctx.parametros().parametro():
+                    nome_param = param_ctx.IDENT().getText()
+                    if param_ctx.tipo_base():
+                        tipo_param = param_ctx.tipo_base().getText().replace("^", "")
+                    else:
+                        tipo_param = param_ctx.tipo_identificado().getText().replace("^", "")
+                    parametros.append((nome_param, tipo_param))
+            
+            # Registrar o procedimento
+            self.procedimentos[nome_procedimento] = {
+                'parametros': parametros
+            }
         
-        # Busca a informação da função na tabela de símbolos.
-        func_info_entry = self.symbol_table.lookup_symbol(nome_func)
-        if func_info_entry == None: 
-            self.erros.append(f"Linha {line}: identificador {nome_func} nao declarado")
-            return None # Não é possível determinar o tipo se a função não foi declarada.
+        # Entrar no escopo do procedimento
+        self.escopo_atual = 'procedimento'
+        self.simbolos_locais = {}
         
-        # Verifica se o identificador encontrado é realmente uma função.
-        if func_info_entry.category != 'funcao':
-            self.erros.append(f"Linha {line}: identificador {nome_func} nao eh uma funcao")
-            return None
+        # Adicionar parâmetros ao escopo local
+        if ctx.parametros():
+            for param_ctx in ctx.parametros().parametro():
+                nome_param = param_ctx.IDENT().getText()
+                if param_ctx.tipo_base():
+                    tipo_param = param_ctx.tipo_base().getText().replace("^", "")
+                else:
+                    tipo_param = param_ctx.tipo_identificado().getText().replace("^", "")
+                self.simbolos_locais[nome_param] = tipo_param
+                
+                # Se o tipo é um registro definido pelo usuário, copiar seus campos
+                if tipo_param in self.tipos_definidos and tipo_param in self.campos_registro:
+                    self.campos_registro[nome_param] = self.campos_registro[tipo_param]
 
-        # Obtém os parâmetros esperados e os argumentos reais.
-        expected_params = func_info_entry.type_info['parametros']
-        actual_args = []
-        if ctx.lista_expressao(): # Verifica se há argumentos na chamada.
-            actual_args = [self.tipo_expressao(exp) for exp in ctx.lista_expressao().expressao()]
-            actual_args = [arg_type for arg_type in actual_args if arg_type is not None] # Filtra argumentos com erros
+    def exitDeclaracao_procedimento(self, ctx:LAParser.Declaracao_procedimentoContext):
+        # Sair do escopo do procedimento
+        self.escopo_atual = 'global'
+        self.simbolos_locais = {}
 
-        # Verifica o número de argumentos.
-        if len(expected_params) != len(actual_args):
-            self.erros.append(f"Linha {line}: incompatibilidade de argumentos na chamada de {nome_func} (numero de argumentos)")
-            return None
-
-        # Verifica a compatibilidade de tipo de cada argumento.
-        for i, expected_type in enumerate(expected_params):
-            if not self.eh_compativel_atribuicao(expected_type, actual_args[i]):
-                self.erros.append(f"Linha {line}: incompatibilidade de argumentos na chamada de {nome_func} (tipo do argumento {i+1})")
-                return None # Se um argumento é incompatível, toda a chamada é inválida.
+    def enterRetorne(self, ctx:LAParser.RetorneContext):
+        # Verificar se estamos em uma função (retorne só é permitido em funções)
+        if self.escopo_atual != 'funcao':
+            self.erros.append(f"Linha {ctx.start.line}: comando retorne nao permitido nesse escopo")
         
-        return func_info_entry.type_info['retorno'] # Retorna o tipo de retorno da função.
+        # Processar a expressão de retorno
+        self.tipo_expressao(ctx.expressao())
+
+    def enterComandoenquanto(self, ctx: LAParser.ComandoenquantoContext):
+        tipo_condicao = self.tipo_expressao(ctx.expressao())
+
+    def enterComandose(self, ctx: LAParser.ComandoseContext):
+        # Processar a expressão condicional
+        tipo_condicao = self.tipo_expressao(ctx.expressao())
+
+    # Verificar identificadores usados em 'leia' (leitura)
+    def enterLeitura(self, ctx:LAParser.LeituraContext):
+        lista_ids = ctx.lista_identificadores()
+        for child in lista_ids.children:
+            if child.getText() == ',':
+                continue
+            if isinstance(child, LAParser.Acesso_campoContext):
+                # Validar acesso a campo
+                self.validar_acesso_campo(child)
+            elif hasattr(LAParser, 'Acesso_arrayContext') and isinstance(child, LAParser.Acesso_arrayContext):
+                # Validar acesso a array
+                self.validar_acesso_array(child)
+            else:
+                # É um identificador simples
+                nome = child.getText()
+                if nome not in self.simbolos:
+                    token_id = child.getSymbol()
+                    self.erros.append(f"Linha {self.linha_token(token_id)}: identificador {nome} nao declarado")
+
+    def validar_acesso_campo(self, ctx):
+        """Valida acesso a campo como variavel.campo"""
+        if hasattr(ctx, 'IDENT') and ctx.IDENT():
+            # Primeiro identificador é a variável
+            nome_var = ctx.IDENT(0).getText()
+            nome_campo = ctx.IDENT(1).getText()
+            
+            # Verificar se a variável existe (primeiro local, depois global)
+            if nome_var not in self.simbolos_locais and nome_var not in self.simbolos:
+                token_var = ctx.IDENT(0).getSymbol()
+                self.erros.append(f"Linha {self.linha_token(token_var)}: identificador {nome_var}.{nome_campo} nao declarado")
+                return
+            
+            # Verificar se a variável tem campos (é um registro)
+            if nome_var in self.campos_registro:
+                campos = self.campos_registro[nome_var]
+                if nome_campo not in campos:
+                    token_campo = ctx.IDENT(1).getSymbol()
+                    self.erros.append(f"Linha {self.linha_token(token_campo)}: identificador {nome_var}.{nome_campo} nao declarado")
+            else:
+                # Variável não é um registro
+                token_campo = ctx.IDENT(1).getSymbol()
+                self.erros.append(f"Linha {self.linha_token(token_campo)}: identificador {nome_var}.{nome_campo} nao declarado")
+
+    def validar_acesso_array(self, ctx):
+        """Valida acesso a array como variavel[indice]"""
+        if hasattr(ctx, 'IDENT') and ctx.IDENT():
+            nome_var = ctx.IDENT().getText()
+            
+            # Verificar se a variável existe
+            if nome_var not in self.simbolos:
+                token_var = ctx.IDENT().getSymbol()
+                self.erros.append(f"Linha {self.linha_token(token_var)}: identificador {nome_var} nao declarado")
+                return
+            
+            # Verificar se o índice é um inteiro
+            tipo_indice = self.tipo_expressao(ctx.expressao())
+            if tipo_indice and tipo_indice != 'inteiro':
+                # Não reportar erro aqui se o tipo não for conhecido, apenas se for conhecido e diferente de inteiro
+                pass
+
+    def enterChamada_procedimento(self, ctx:LAParser.Chamada_procedimentoContext):
+        """Valida chamadas de procedimento"""
+        nome_procedimento = ctx.IDENT().getText()
+        
+        # Verificar se o procedimento existe
+        if nome_procedimento not in self.procedimentos:
+            self.erros.append(f"Linha {ctx.start.line}: identificador {nome_procedimento} nao declarado")
+            return
+        
+        # Obter informações do procedimento
+        info_procedimento = self.procedimentos[nome_procedimento]
+        parametros_esperados = info_procedimento['parametros']
+        
+        # Verificar parâmetros passados
+        parametros_passados = []
+        if ctx.lista_expressao():
+            for exp in ctx.lista_expressao().expressao():
+                tipo_param = self.tipo_expressao(exp)
+                parametros_passados.append(tipo_param)
+        
+        # Validar número de parâmetros
+        if len(parametros_passados) != len(parametros_esperados):
+            self.erros.append(f"Linha {ctx.start.line}: incompatibilidade de parametros na chamada de {nome_procedimento}")
+            return
+        
+        # Validar tipos dos parâmetros
+        for i, (tipo_passado, (_, tipo_esperado)) in enumerate(zip(parametros_passados, parametros_esperados)):
+            if tipo_passado and tipo_passado != tipo_esperado:  # Exigir compatibilidade exata para parâmetros
+                self.erros.append(f"Linha {ctx.start.line}: incompatibilidade de parametros na chamada de {nome_procedimento}")
+                break
 
 
-# Função principal para executar o analisador semântico.
+    # Verificar identificadores usados em 'escreva'
+    # Pode ser extendido para expressões, mas simplificado aqui (por token de IDENT)
+    def enterEscrita(self, ctx:LAParser.EscritaContext):
+        for exp in ctx.expressao():
+            self.tipo_expressao(exp)
+
 def main():
     if len(sys.argv) != 3:
         print("Uso: python3 analisador_semantico.py entrada.txt saida.txt")
-        sys.exit(1)
+        return
 
     arquivo_entrada = sys.argv[1]
     arquivo_saida = sys.argv[2]
 
-    try:
-        input_stream = FileStream(arquivo_entrada, encoding='utf-8')
-        lexer = LALexer(input_stream)
-        # Remove o listener de erro padrão para evitar saída de erros de sintaxe no console.
-        lexer.removeErrorListeners()
-        # Opcional: Adicione um CustomErrorListener se desejar capturar e manipular erros de sintaxe.
-        # lexer.addErrorListener(CustomErrorListener())
+    input_stream = FileStream(arquivo_entrada, encoding='utf-8')
+    lexer = LALexer(input_stream)
+    token_stream = CommonTokenStream(lexer)
+    parser = LAParser(token_stream)
 
-        token_stream = CommonTokenStream(lexer)
-        parser = LAParser(token_stream)
-        parser.removeErrorListeners() # Remove o listener de erro padrão do parser também.
-        # parser.addErrorListener(CustomErrorListener())
+    tree = parser.programa()
 
-        tree = parser.programa() # Inicia a análise a partir da regra 'programa'.
+    analisador = AnalisadorSemantico(token_stream)
+    walker = ParseTreeWalker()
+    walker.walk(analisador, tree)
 
-        analisador = AnalisadorSemantico(token_stream)
-        walker = ParseTreeWalker()
-        walker.walk(analisador, tree) # Percorre a árvore de parse com o analisador.
-
-        with open(arquivo_saida, 'w', encoding='utf-8') as f:
-            for erro in analisador.erros:
-                f.write(erro + '\n')
-            f.write("Fim da compilacao\n")
-
-    except FileNotFoundError:
-        print(f"Erro: Arquivo de entrada '{arquivo_entrada}' nao encontrado.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Ocorreu um erro inesperado durante a análise: {e}")
-        # Opcional: Printar traceback para depuração
-        # import traceback
-        # traceback.print_exc()
-        sys.exit(1)
+    with open(arquivo_saida, 'w', encoding='utf-8') as f:
+        for erro in analisador.erros:
+            f.write(erro + '\n')
+        f.write("Fim da compilacao\n")
 
 if __name__ == "__main__":
     main()

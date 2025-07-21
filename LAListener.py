@@ -1,6 +1,6 @@
-# Generated from LA.g4 by ANTLR 4.13.2
+# Generated from LA.g4 by ANTLR 4.7.2
 from antlr4 import *
-if "." in __name__:
+if __name__ is not None and "." in __name__:
     from .LAParser import LAParser
 else:
     from LAParser import LAParser
@@ -221,6 +221,15 @@ class LAListener(ParseTreeListener):
 
     # Exit a parse tree produced by LAParser#acesso_campo.
     def exitAcesso_campo(self, ctx:LAParser.Acesso_campoContext):
+        pass
+
+
+    # Enter a parse tree produced by LAParser#acesso_array.
+    def enterAcesso_array(self, ctx:LAParser.Acesso_arrayContext):
+        pass
+
+    # Exit a parse tree produced by LAParser#acesso_array.
+    def exitAcesso_array(self, ctx:LAParser.Acesso_arrayContext):
         pass
 
 
@@ -458,5 +467,3 @@ class LAListener(ParseTreeListener):
         pass
 
 
-
-del LAParser

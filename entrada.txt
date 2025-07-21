@@ -1,18 +1,20 @@
-{ dada uma variável, modificar seu conteúdo usando apenas seu endereço }
+{ leitura de nome e idade com escrita de mensagem usando estes dados }
+
+constante maioridade: inteiro = 18
 
 algoritmo
-	declare valor: inteiro { um inteiro comum }
-	declare ponteiro: ^inteiro { um ponteiro para inteiro }
+	declare
+		nome: literal
+	declare
+		idade, maioridade: inteiro
 
-	{ atribuição de um dado inicial }
-	valor <- 100
+	{ leitura de nome e idade do teclado }
+	escreva("Nome: ")
+	leia(nome)
+	escreva("Idade: ")
+	leia(idade)
 
-	{ determinação do endereço da variável }
-	ponteiro <- &valor
+	{ saída da mensagem na tela }
+	escreva(nome, " tem ", idade, " anos.")
 
-	{ uso do ponteiro para mexer na memória }
-	^ponteiro <- "200"
-
-	{ verificação do valor armazenado em valor }
-	escreva(valor) { 200!!! }
 fim_algoritmo

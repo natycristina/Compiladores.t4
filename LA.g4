@@ -39,7 +39,8 @@ OP_RELACIONAL : '<=' | '>=' | '<>' | '<' | '>' ;
 OP_ARITMETICO : '+' | '-' | '*' | '/' | '%' ;
 PONTO : '.' ;
 E_COMERCIAL : '&' ;
-COLCHETES : '[' | ']' ;
+ABRE_COLCHETE : '[' ;
+FECHA_COLCHETE : ']' ;
 CIRCUNFLEXO : '^' ;
 PONTOS : '..' ;
 
@@ -65,7 +66,7 @@ bloco_algoritmo
     : 'algoritmo' corpo_algoritmo ;
 
 corpo_algoritmo
-    : (comando | declaracao | declaracao_constante)* ;
+    : (comando | declaracao | declaracao_constante | declaracao_tipo)* ;
 
 declaracao
     : 'declare' lista_variaveis
@@ -117,7 +118,7 @@ lista_variaveis
     ;
 
 variavel
-    : IDENT (',' IDENT)* ':' tipo
+    : IDENT (ABRE_COLCHETE (NUM_INT | IDENT) FECHA_COLCHETE)? (',' IDENT (ABRE_COLCHETE (NUM_INT | IDENT) FECHA_COLCHETE)?)* ':' tipo
     ;
 
 tipo
@@ -148,6 +149,10 @@ campo
 
 acesso_campo
     : IDENT ('.' IDENT)+
+    ;
+
+acesso_array
+    : IDENT ABRE_COLCHETE expressao FECHA_COLCHETE
     ;
 
 comando
@@ -211,11 +216,11 @@ leitura
     ;
 
 lista_identificadores
-    : (IDENT | acesso_campo) (',' (IDENT | acesso_campo))*
+    : (IDENT | acesso_campo | acesso_array) (',' (IDENT | acesso_campo | acesso_array))*
     ;
 
 atribuicao
-    : (IDENT | acesso_campo | CIRCUNFLEXO IDENT) ATRIBUICAO expressao ;
+    : (IDENT | acesso_campo | acesso_array | CIRCUNFLEXO IDENT) ATRIBUICAO expressao ;
 
 escrita
     : 'escreva' '(' expressao (',' expressao)* ')' ;
@@ -257,6 +262,7 @@ fator
     | chamada_funcao
     | potencia
     | acesso_campo
+    | acesso_array
     | IDENT
     | NUM_INT
     | NUM_REAL
